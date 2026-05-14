@@ -1,0 +1,1066 @@
+<?php
+/**
+ * Plugin Name:       Hospital Statistics
+ * Plugin URI:        mailto:detherslagos@email.com
+ * Description:       Complete Hospital Statistical Indicators — CRUD data entry, auto-calculates 13 indicators, Monthly/Quarterly/Yearly/Comparison views with interactive charts, CSV export/import, print reports. Compatible with PHP 7.4+. For Dr. George Tocao Hofer Medical Center, Ipil, Zamboanga Sibugay.
+ * Version:           2.0.2
+ * Author:            Dether/Zaheer Lagos | I.T NGANI
+ * Author URI:        https://github.com/itszaheerlgs
+ * License:           GPL-2.0+
+ * Text Domain:       hospital-statistics
+ * Requires at least: 5.6
+ * Requires PHP:      7.4
+ */
+// Allow public access to hstats REST endpoints regardless of other restrictions
+add_filter( 'rest_authentication_errors', function( $result ) {
+    if ( ! empty( $GLOBALS['wp']->query_vars['rest_route'] ) &&
+         strpos( $GLOBALS['wp']->query_vars['rest_route'], '/hstats/' ) === 0 ) {
+        return null; // null = no auth error, proceed normally
+    }
+    return $result;
+}, 999 );
+
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+
+define( 'HSTATS_VERSION',    '2.0.2' );
+define( 'HSTATS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
+define( 'HSTATS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
+define( 'HSTATS_TABLE',      'hospital_statistics' );
+define( 'HSTATS_LOG_TABLE',  'hospital_statistics_log' );
+
+/* ==========================================================================
+   1. ACTIVATION / DEACTIVATION / UNINSTALL
+========================================================================== */
+register_activation_hook( __FILE__, 'hstats_activate' );
+register_deactivation_hook( __FILE__, 'hstats_deactivate' );
+
+function hstats_activate() {
+    hstats_create_tables();
+    hstats_set_default_options();
+}
+
+function hstats_deactivate() {
+    flush_rewrite_rules();
+}
+
+/**
+ * Self-healing: recreate tables on every admin load if they are missing.
+ * This covers cases where the plugin was installed manually (FTP/cPanel)
+ * and the activation hook never fired, or tables were accidentally dropped.
+ */
+add_action( 'admin_init', function() {
+    $db_ver = get_option( 'hstats_db_version', '0' );
+    if ( version_compare( $db_ver, HSTATS_VERSION, '<' ) ) {
+        hstats_create_tables();
+        update_option( 'hstats_db_version', HSTATS_VERSION );
+    }
+} );
+
+function hstats_create_tables() {
+    global $wpdb;
+    $charset = $wpdb->get_charset_collate();
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+
+    // NOTE: dbDelta() requires exactly 2 spaces before each column/key line.
+    // Do NOT use tabs here — dbDelta will silently fail or skip columns.
+    $t    = $wpdb->prefix . HSTATS_TABLE;
+    $sql1 = "CREATE TABLE {$t} (\n"
+          . "  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+          . "  period_year SMALLINT NOT NULL,\n"
+          . "  period_month TINYINT NOT NULL,\n"
+          . "  period_quarter TINYINT NOT NULL,\n"
+          . "  ip_service_days_total INT NOT NULL DEFAULT 0,\n"
+          . "  ip_days_in_period TINYINT NOT NULL DEFAULT 0,\n"
+          . "  ip_remaining_midnight INT NOT NULL DEFAULT 0,\n"
+          . "  ip_admissions INT NOT NULL DEFAULT 0,\n"
+          . "  ip_discharges_deaths INT NOT NULL DEFAULT 0,\n"
+          // . "  ip_same_day INT NOT NULL DEFAULT 0,\n"
+          // . "  ip_authorized_beds SMALLINT NOT NULL DEFAULT 100,\n"
+          . "  ip_same_day INT NOT NULL DEFAULT 0,\n"
+          . "  ip_census_discharges INT NOT NULL DEFAULT 0,\n"
+          . "  ip_authorized_beds SMALLINT NOT NULL DEFAULT 100,\n"
+          . "  ip_length_of_stay_total INT NOT NULL DEFAULT 0,\n"
+          . "  d_total INT NOT NULL DEFAULT 0,\n"
+          . "  d_under_48h INT NOT NULL DEFAULT 0,\n"
+          . "  d_newborns INT NOT NULL DEFAULT 0,\n"
+          . "  opd_new_visits INT NOT NULL DEFAULT 0,\n"
+          . "  opd_revisits INT NOT NULL DEFAULT 0,\n"
+          . "  opd_days TINYINT NOT NULL DEFAULT 0,\n"
+          . "  ed_consults INT NOT NULL DEFAULT 0,\n"
+          . "  ed_days TINYINT NOT NULL DEFAULT 0,\n"
+          . "  ob_cs_sections INT NOT NULL DEFAULT 0,\n"
+          . "  ob_total_deliveries INT NOT NULL DEFAULT 0,\n"
+          . "  ob_maternal_deaths INT NOT NULL DEFAULT 0,\n"
+          . "  ob_obstetrical_discharges INT NOT NULL DEFAULT 0,\n"
+          . "  inf_total_infections INT NOT NULL DEFAULT 0,\n"
+          . "  notes TEXT,\n"
+          . "  created_by BIGINT UNSIGNED,\n"
+          . "  updated_by BIGINT UNSIGNED,\n"
+          . "  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n"
+          . "  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\n"
+          . "  PRIMARY KEY (id),\n"
+          . "  UNIQUE KEY uk_period (period_year, period_month)\n"
+          . ") {$charset};";
+    dbDelta( $sql1 );
+
+    $l    = $wpdb->prefix . HSTATS_LOG_TABLE;
+    $sql2 = "CREATE TABLE {$l} (\n"
+          . "  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,\n"
+          . "  record_id BIGINT UNSIGNED,\n"
+          . "  action VARCHAR(20) NOT NULL,\n"
+          . "  user_id BIGINT UNSIGNED,\n"
+          . "  user_name VARCHAR(100),\n"
+          . "  old_data LONGTEXT,\n"
+          . "  new_data LONGTEXT,\n"
+          . "  ip_address VARCHAR(45),\n"
+          . "  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n"
+          . "  PRIMARY KEY (id),\n"
+          . "  KEY idx_record (record_id),\n"
+          . "  KEY idx_created (created_at)\n"
+          . ") {$charset};";
+    dbDelta( $sql2 );
+}
+
+function hstats_set_default_options() {
+    add_option( 'hstats_hospital_name',    'Dr. George Tocao Hofer Medical Center' );
+    add_option( 'hstats_hospital_address', 'Purok Santan, Brgy. Tenan, Ipil, Zamboanga Sibugay' );
+    add_option( 'hstats_default_beds',     100 );
+    add_option( 'hstats_fiscal_year_start', 1 );
+    add_option( 'hstats_enable_notes',     1 );
+    add_option( 'hstats_enable_audit',     1 );
+    add_option( 'hstats_roles_allowed',    'manage_options' );
+}
+
+/* ==========================================================================
+   2. FORMULAS CLASS
+========================================================================== */
+class HSTATS_Formulas {
+
+    public static function average_daily_census( int $isd, int $days ): float {
+        return $days > 0 ? round( $isd / $days, 2 ) : 0.0;
+    }
+
+    public static function bed_occupancy_rate( int $isd, int $beds, int $days ): float {
+        $d = $beds * $days;
+        return $d > 0 ? round( ( $isd / $d ) * 100, 2 ) : 0.0;
+    }
+
+    // public static function bed_turnover_interval( int $beds, int $days, int $isd, int $dd ): float {
+    //     return $dd > 0 ? round( ( ( $beds * $days ) - $isd ) / $dd, 2 ) : 0.0;
+    // }
+    // public static function bed_turnover_interval( int $beds, int $days, int $los_total, int $dd ): float {
+    // return $dd > 0 ? round( ( ( $beds * $days ) - $los_total ) / $dd, 2 ) : 0.0;
+    // }
+    // public static function bed_turnover_interval( int $beds, int $days, int $isd, int $dd ): float {
+    // return $dd > 0 ? round( ( ( $beds * $days ) - $isd ) / $dd, 2 ) : 0.0;
+    // }
+    // public static function bed_turnover_interval( int $beds, int $days, int $isd, int $dd ): float {
+    // return $dd > 0 ? round( ( ( $beds * $days ) - $isd ) / $dd, 2 ) : 0.0;
+    // }
+    // WITH THIS:
+    public static function bed_turnover_interval( int $beds, int $days, int $isd, int $dd ): float {
+        return $dd > 0 ? round( abs( ( ( $beds * $days ) - $isd ) / $dd ), 2 ) : 0.0;
+    }
+    public static function bed_turnover_rate( int $dd, int $beds ): float {
+        return $beds > 0 ? round( $dd / $beds, 2 ) : 0.0;
+    }
+
+    public static function gross_death_rate( int $deaths, int $dd ): float {
+        return $dd > 0 ? round( ( $deaths / $dd ) * 100, 2 ) : 0.0;
+    }
+
+    public static function net_death_rate( int $deaths, int $deaths48, int $dd ): float {
+        $denom = $dd - $deaths48;
+        return $denom > 0 ? round( ( ( $deaths - $deaths48 ) / $denom ) * 100, 2 ) : 0.0;
+    }
+    public static function average_length_of_stay( int $los, int $dd ): float {
+        return $dd > 0 ? round( $los / $dd, 2 ) : 0.0;
+    }
+
+    public static function average_opd_visits( int $new, int $revisits, int $days ): float {
+        return $days > 0 ? round( ( $new + $revisits ) / $days, 2 ) : 0.0;
+    }
+
+    public static function average_ed_patients( int $consults, int $days ): float {
+        return $days > 0 ? round( $consults / $days, 2 ) : 0.0;
+    }
+
+    public static function caesarean_rate( int $cs, int $deliveries ): float {
+        return $deliveries > 0 ? round( ( $cs / $deliveries ) * 100, 2 ) : 0.0;
+    }
+
+    public static function maternal_death_rate( int $mdeaths, int $ob_dd ): float {
+        return $ob_dd > 0 ? round( ( $mdeaths / $ob_dd ) * 100, 4 ) : 0.0;
+    }
+
+    public static function gross_infection_rate( int $infections, int $dd ): float {
+        return $dd > 0 ? round( ( $infections / $dd ) * 100, 2 ) : 0.0;
+    }
+
+public static function compute_all( array $r ): array {
+    $isd        = (int)( $r['ip_service_days_total']   ?? 0 );
+    $days       = (int)( $r['ip_days_in_period']       ?? 0 );
+    $beds       = (int)( $r['ip_authorized_beds']      ?? 100 );
+    $dd         = (int)( $r['ip_discharges_deaths']    ?? 0 );
+    $remaining  = (int)( $r['ip_remaining_midnight']   ?? 0 );
+    $admissions = (int)( $r['ip_admissions']           ?? 0 );
+    $same_day   = (int)( $r['ip_same_day']             ?? 0 );
+    $census_dd  = (int)( $r['ip_census_discharges']    ?? 0 );
+    $csd        = max( 0, ( $remaining + $admissions ) - $census_dd + $same_day );
+
+    return [
+        'ADC' => self::average_daily_census( $isd, $days ),
+        'ISD' => $isd,
+        'CSD' => $csd,
+        'BOR' => self::bed_occupancy_rate( $isd, $beds, $days ),
+            // 'BTI' => self::bed_turnover_interval( $beds, $days, $isd, $dd ),
+            // 'BTI' => self::bed_turnover_interval( $beds, $days, (int)($r['ip_length_of_stay_total']??0), $dd ),
+            'BTI' => self::bed_turnover_interval( $beds, $days, $isd, $dd ),
+            // 'BTI' => self::bed_turnover_interval( $beds, $days, $isd, $dd ),
+            'BTR' => self::bed_turnover_rate( $dd, $beds ),
+            'GDR' => self::gross_death_rate( (int)($r['d_total']??0), $dd ),
+            'NDR' => self::net_death_rate( (int)($r['d_total']??0), (int)($r['d_under_48h']??0), $dd, (int)($r['d_newborns']??0) ),
+
+            'ALS' => self::average_length_of_stay( (int)($r['ip_length_of_stay_total']??0), $dd ),
+            'AOV' => self::average_opd_visits( (int)($r['opd_new_visits']??0), (int)($r['opd_revisits']??0), (int)($r['opd_days']??0) ),
+            'AED' => self::average_ed_patients( (int)($r['ed_consults']??0), (int)($r['ed_days']??0) ),
+            'CR'  => self::caesarean_rate( (int)($r['ob_cs_sections']??0), (int)($r['ob_total_deliveries']??0) ),
+            'MDR' => self::maternal_death_rate( (int)($r['ob_maternal_deaths']??0), (int)($r['ob_obstetrical_discharges']??0) ),
+            'GIR' => self::gross_infection_rate( (int)($r['inf_total_infections']??0), $dd ),
+            '_admissions'      => (int)($r['ip_admissions']??0),
+            '_discharges'      => $dd,
+            '_deaths'          => (int)($r['d_total']??0),
+            '_opd_total'       => (int)($r['opd_new_visits']??0) + (int)($r['opd_revisits']??0),
+            '_ed_total'        => (int)($r['ed_consults']??0),
+            '_deliveries'      => (int)($r['ob_total_deliveries']??0),
+            '_cs'              => (int)($r['ob_cs_sections']??0),
+            '_beds'            => $beds,
+            '_days'            => $days,
+            '_infections'      => (int)($r['inf_total_infections']??0),
+            '_maternal_deaths' => (int)($r['ob_maternal_deaths']??0),
+            '_isd'             => $isd,
+        ];
+    }
+}
+
+/* ==========================================================================
+   3. DATA ACCESS LAYER
+========================================================================== */
+class HSTATS_Data {
+
+    private static function table(): string {
+        global $wpdb;
+        return $wpdb->prefix . HSTATS_TABLE;
+    }
+
+    public static function get_row_by_id( int $id ): ?array {
+        global $wpdb;
+        $result = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM " . self::table() . " WHERE id=%d", $id ), ARRAY_A );
+        return $result ?: null;
+    }
+
+    public static function get_month( int $year, int $month ): ?array {
+        global $wpdb;
+        $row = $wpdb->get_row(
+            $wpdb->prepare( "SELECT * FROM " . self::table() . " WHERE period_year=%d AND period_month=%d", $year, $month ),
+            ARRAY_A
+        );
+        return $row ? HSTATS_Formulas::compute_all( $row ) : null;
+    }
+
+    public static function get_raw_month( int $year, int $month ): ?array {
+        global $wpdb;
+        $result = $wpdb->get_row(
+            $wpdb->prepare( "SELECT * FROM " . self::table() . " WHERE period_year=%d AND period_month=%d", $year, $month ),
+            ARRAY_A
+        );
+        return $result ?: null;
+    }
+
+    public static function get_quarter( int $year, int $quarter ): ?array {
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            $wpdb->prepare( "SELECT * FROM " . self::table() . " WHERE period_year=%d AND period_quarter=%d ORDER BY period_month", $year, $quarter ),
+            ARRAY_A
+        );
+        return self::aggregate( $rows );
+    }
+
+    public static function get_year( int $year ): ?array {
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            $wpdb->prepare( "SELECT * FROM " . self::table() . " WHERE period_year=%d ORDER BY period_month", $year ),
+            ARRAY_A
+        );
+        return self::aggregate( $rows );
+    }
+
+    public static function get_months_in_year( int $year ): array {
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            $wpdb->prepare( "SELECT * FROM " . self::table() . " WHERE period_year=%d ORDER BY period_month ASC", $year ),
+            ARRAY_A
+        );
+        $out = [];
+        foreach ( $rows as $r ) {
+            $out[ (int)$r['period_month'] ] = HSTATS_Formulas::compute_all( $r );
+        }
+        return $out;
+    }
+
+    public static function get_all_raw(): array {
+        global $wpdb;
+        $results = $wpdb->get_results( "SELECT * FROM " . self::table() . " ORDER BY period_year DESC, period_month ASC", ARRAY_A );
+        return $results ?: [];
+    }
+
+    public static function get_available_years(): array {
+        global $wpdb;
+        $results = $wpdb->get_col( "SELECT DISTINCT period_year FROM " . self::table() . " ORDER BY period_year DESC" );
+        return $results ?: [];
+    }
+
+    public static function aggregate( array $rows ): ?array {
+        if ( empty( $rows ) ) return null;
+        $sum = [
+            'ip_service_days_total'=>0,'ip_days_in_period'=>0,'ip_remaining_midnight'=>0,
+            'ip_admissions'=>0,'ip_discharges_deaths'=>0,'ip_same_day'=>0,
+            'ip_authorized_beds'=>0,'ip_length_of_stay_total'=>0,
+            'd_total'=>0,'d_under_48h'=>0,'d_newborns'=>0,
+            'opd_new_visits'=>0,'opd_revisits'=>0,'opd_days'=>0,
+            'ed_consults'=>0,'ed_days'=>0,
+            'ob_cs_sections'=>0,'ob_total_deliveries'=>0,'ob_maternal_deaths'=>0,'ob_obstetrical_discharges'=>0,
+            'inf_total_infections'=>0,
+        ];
+        $bed_sum = 0; $cnt = count( $rows );
+        foreach ( $rows as $r ) {
+            foreach ( array_keys( $sum ) as $k ) {
+                $sum[$k] += isset($r[$k]) ? (int)$r[$k] : 0;
+            }
+            $bed_sum += (int)($r['ip_authorized_beds'] ?? 100);
+        }
+        $sum['ip_authorized_beds'] = $cnt > 0 ? (int)round( $bed_sum / $cnt ) : 100;
+        return HSTATS_Formulas::compute_all( $sum );
+    }
+
+    public static function save_month( array $data, int $current_user_id = 0 ): array {
+        global $wpdb;
+        $table = self::table();
+        $year  = (int)($data['period_year']  ?? date('Y'));
+        $month = (int)($data['period_month'] ?? date('n'));
+        $exists = $wpdb->get_row( $wpdb->prepare( "SELECT id FROM {$table} WHERE period_year=%d AND period_month=%d", $year, $month ), ARRAY_A );
+
+        $quarter = (int)ceil( $month / 3 );
+        $row = [
+            'period_year'              => $year,
+            'period_month'             => $month,
+            'period_quarter'           => $quarter,
+            'ip_service_days_total'    => (int)($data['ip_service_days_total']    ?? 0),
+            'ip_days_in_period'        => (int)($data['ip_days_in_period']         ?? 0),
+            'ip_remaining_midnight'    => (int)($data['ip_remaining_midnight']     ?? 0),
+            'ip_admissions'            => (int)($data['ip_admissions']             ?? 0),
+            'ip_discharges_deaths'     => (int)($data['ip_discharges_deaths']      ?? 0),
+'ip_same_day'              => (int)($data['ip_same_day']               ?? 0),
+'ip_census_discharges'     => (int)($data['ip_census_discharges']      ?? 0),
+'ip_authorized_beds'       => (int)($data['ip_authorized_beds']        ?? 100),
+            'ip_length_of_stay_total'  => (int)($data['ip_length_of_stay_total']   ?? 0),
+            'd_total'                  => (int)($data['d_total']                   ?? 0),
+            'd_under_48h'              => (int)($data['d_under_48h']               ?? 0),
+            'd_newborns'               => (int)($data['d_newborns']                ?? 0),
+            'opd_new_visits'           => (int)($data['opd_new_visits']            ?? 0),
+            'opd_revisits'             => (int)($data['opd_revisits']              ?? 0),
+            'opd_days'                 => (int)($data['opd_days']                  ?? 0),
+            'ed_consults'              => (int)($data['ed_consults']               ?? 0),
+            'ed_days'                  => (int)($data['ed_days']                   ?? 0),
+            'ob_cs_sections'           => (int)($data['ob_cs_sections']            ?? 0),
+            'ob_total_deliveries'      => (int)($data['ob_total_deliveries']       ?? 0),
+            'ob_maternal_deaths'       => (int)($data['ob_maternal_deaths']        ?? 0),
+            'ob_obstetrical_discharges'=> (int)($data['ob_obstetrical_discharges'] ?? 0),
+            'inf_total_infections'     => (int)($data['inf_total_infections']      ?? 0),
+            'notes'                    => sanitize_textarea_field( $data['notes'] ?? '' ),
+        ];
+
+        $old_data = null;
+        if ( $exists ) {
+            $old_data = $wpdb->get_row( $wpdb->prepare("SELECT * FROM {$table} WHERE id=%d", (int)$exists['id']), ARRAY_A );
+            $row['updated_by'] = $current_user_id;
+            $wpdb->update( $table, $row, [ 'id' => (int)$exists['id'] ] );
+            $action = 'updated'; $id = (int)$exists['id'];
+        } else {
+            $row['created_by'] = $current_user_id;
+            $row['updated_by'] = $current_user_id;
+            $wpdb->insert( $table, $row );
+            $action = 'created'; $id = (int)$wpdb->insert_id;
+        }
+
+        if ( get_option('hstats_enable_audit', 1) ) {
+            hstats_log( $id, $action, $current_user_id, $old_data, $row );
+        }
+
+        return [ 'success' => true, 'id' => $id, 'action' => $action ];
+    }
+
+    public static function delete_month( int $id, int $current_user_id = 0 ): bool {
+        global $wpdb;
+        $table = $wpdb->prefix . HSTATS_TABLE;
+        $old = $wpdb->get_row( $wpdb->prepare("SELECT * FROM {$table} WHERE id=%d", $id), ARRAY_A );
+        if ( ! $old ) return false;
+        $wpdb->delete( $table, [ 'id' => $id ] );
+        hstats_log( $id, 'deleted', $current_user_id, $old, null );
+        return true;
+    }
+}
+
+/* ==========================================================================
+   4. AUDIT LOG
+========================================================================== */
+function hstats_log( int $record_id, string $action, int $user_id, $old_data, $new_data ): void {
+    global $wpdb;
+    $user = get_userdata( $user_id );
+    $wpdb->insert( $wpdb->prefix . HSTATS_LOG_TABLE, [
+        'record_id'  => $record_id,
+        'action'     => $action,
+        'user_id'    => $user_id,
+        'user_name'  => $user ? $user->user_login : 'system',
+        'old_data'   => $old_data ? wp_json_encode( $old_data ) : null,
+        'new_data'   => $new_data ? wp_json_encode( $new_data ) : null,
+        'ip_address' => sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' ),
+    ] );
+}
+
+/* ==========================================================================
+   5. INDICATOR METADATA
+========================================================================== */
+function hstats_indicator_labels(): array {
+    return [
+        'ADC' => [ 'label'=>'Average Daily Census',       'unit'=>'pts/day',    'icon'=>'🛏',  'color'=>'#2563eb', 'desc'=>'Average inpatients per day in the period.' ],
+        // 'ISD' => [ 'label'=>'Inpatient Service Days',     'unit'=>'days',       'icon'=>'📅',  'color'=>'#7c3aed', 'desc'=>'Total days of care rendered to all inpatients.' ],
+'ISD' => [ 'label'=>'Inpatient Service Days',     'unit'=>'days',       'icon'=>'📅',  'color'=>'#7c3aed', 'desc'=>'Total accumulated inpatient service days for the period.' ],
+'CSD' => [ 'label'=>'Census Service Days',        'unit'=>'days',       'icon'=>'🗓',  'color'=>'#6d28d9', 'desc'=>'(Inpatients Remaining at Midnight + Admissions) − Discharges & Deaths (last day) + Same Day.' ],
+'BOR' => [ 'label'=>'Bed Occupancy Rate',         'unit'=>'%',          'icon'=>'🏥',  'color'=>'#db2777', 'desc'=>'Percentage of authorized beds occupied.' ],
+        'BTI' => [ 'label'=>'Bed Turnover Interval',      'unit'=>'days',       'icon'=>'⏱',  'color'=>'#d97706', 'desc'=>'Avg idle days between successive patients per bed.' ],
+        'BTR' => [ 'label'=>'Bed Turnover Rate',          'unit'=>'times',      'icon'=>'🔄',  'color'=>'#059669', 'desc'=>'Times each bed changed occupants in the period.' ],
+        'GDR' => [ 'label'=>'Gross Death Rate',           'unit'=>'%',          'icon'=>'⚠',  'color'=>'#dc2626', 'desc'=>'All deaths as proportion of total discharges & deaths.' ],
+        'ALS' => [ 'label'=>'Average Length of Stay',     'unit'=>'days',       'icon'=>'⌛',  'color'=>'#0891b2', 'desc'=>'Average days a patient stays before discharge.' ],
+        'AOV' => [ 'label'=>'Avg OPD Visits / Day',       'unit'=>'visits/day', 'icon'=>'👥',  'color'=>'#4f46e5', 'desc'=>'Average outpatient visits per OPD operating day.' ],
+        'AED' => [ 'label'=>'Avg ED Patients / Day',      'unit'=>'pts/day',    'icon'=>'🚑',  'color'=>'#e11d48', 'desc'=>'Average emergency consults per ED operating day.' ],
+        'GIR' => [ 'label'=>'Gross Infection Rate',       'unit'=>'%',          'icon'=>'🦠',  'color'=>'#65a30d', 'desc'=>'Hospital-acquired infections per total discharges & deaths.' ],
+        'CR'  => [ 'label'=>'Caesarean Section Rate',     'unit'=>'%',          'icon'=>'👶',  'color'=>'#0d9488', 'desc'=>'Proportion of deliveries via Caesarean section.' ],
+        'MDR' => [ 'label'=>'Maternal Death Rate',        'unit'=>'%',          'icon'=>'💔',  'color'=>'#9333ea', 'desc'=>'Direct maternal deaths per OB discharges & deaths.' ],
+        'NDR' => [ 'label'=>'Net Death Rate',             'unit'=>'%',          'icon'=>'📉',  'color'=>'#b91c1c', 'desc'=>'Deaths >48 h as proportion of discharges excluding early deaths.' ],
+    ];
+}
+
+function hstats_input_fields(): array {
+    return [
+        'Inpatient Service' => [
+            'ip_service_days_total'    => [ 'label'=>'Total Inpatient Service Days for a Period',               'min'=>0 ],
+            'ip_days_in_period'        => [ 'label'=>'Total days in the same period',                    'min'=>1, 'max'=>31 ],
+            'ip_authorized_beds'       => [ 'label'=>'Authorized / Implementing Beds',             'min'=>1 ],
+            'ip_remaining_midnight'    => [ 'label'=>'Inpatients Remaining at Midnight (start)',   'min'=>0 ],
+            'ip_admissions'            => [ 'label'=>'Total Admissions',                           'min'=>0 ],
+            'ip_discharges_deaths'     => [ 'label'=>'Total discharges including deaths and newborns',                  'min'=>0 ],
+'ip_same_day'              => [ 'label'=>'Admitted & Discharged Same Day',                      'min'=>0 ],
+'ip_census_discharges'     => [ 'label'=>'Discharges & Deaths (last day of month only)',         'min'=>0 ],
+'ip_length_of_stay_total'  => [ 'label'=>'Total Length of Stay of discharged patients for a period', 'min'=>0 ],
+        ],
+        'Deaths' => [
+            'd_total'      => [ 'label'=>'Total Deaths (incl. Newborns)',   'min'=>0 ],
+            'd_under_48h'  => [ 'label'=>'Deaths Under 48 Hours',           'min'=>0 ],
+            'd_newborns'   => [ 'label'=>'Newborn Deaths',                  'min'=>0 ],
+        ],
+        'Outpatient & Emergency' => [
+            'opd_new_visits' => [ 'label'=>'OPD New Visits',        'min'=>0 ],
+            'opd_revisits'   => [ 'label'=>'OPD Revisits',          'min'=>0 ],
+            'opd_days'       => [ 'label'=>'OPD Days in Period',    'min'=>0, 'max'=>31 ],
+            'ed_consults'    => [ 'label'=>'ED Total Consults',     'min'=>0 ],
+            'ed_days'        => [ 'label'=>'ED Days in Period',     'min'=>0, 'max'=>31 ],
+        ],
+        'Obstetrics' => [
+            'ob_cs_sections'           => [ 'label'=>'Total no. of Caesarean sections in a region in a given period',               'min'=>0 ],
+            'ob_total_deliveries'      => [ 'label'=>'Total no. of deliveries for the same period',                           'min'=>0 ],
+            'ob_maternal_deaths'       => [ 'label'=>'Total no. of direct maternal deaths in a given period',                     'min'=>0 ],
+            'ob_obstetrical_discharges'=> [ 'label'=>'Total OB Discharges (incl. Deaths)',         'min'=>0 ],
+        ],
+        'Infection Control' => [
+            'inf_total_infections' => [ 'label'=>'Hospital-Acquired Infections', 'min'=>0 ],
+        ],
+    ];
+}
+
+/* ==========================================================================
+   6. REST API (CRUD endpoints)
+   FIX: Changed rest_register_route() to register_rest_route() throughout
+========================================================================== */
+add_action( 'rest_api_init', 'hstats_register_rest_routes' );
+function hstats_register_rest_routes(): void {
+    $ns = 'hstats/v1';
+
+    // GET  /records  — list all
+    register_rest_route( $ns, '/records', [
+        'methods'             => 'GET',
+        'callback'            => 'hstats_rest_list',
+        'permission_callback' => 'hstats_rest_read_permission',
+    ] );
+
+    // POST /records  — create
+    register_rest_route( $ns, '/records', [
+        'methods'             => 'POST',
+        'callback'            => 'hstats_rest_create',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+
+    // GET /records/{id}
+    register_rest_route( $ns, '/records/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'callback'            => 'hstats_rest_read',
+        'permission_callback' => 'hstats_rest_read_permission',
+    ] );
+
+    // PUT /records/{id}
+    register_rest_route( $ns, '/records/(?P<id>\d+)', [
+        'methods'             => 'PUT',
+        'callback'            => 'hstats_rest_update',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+
+    // PATCH /records/{id}
+    register_rest_route( $ns, '/records/(?P<id>\d+)', [
+        'methods'             => 'PATCH',
+        'callback'            => 'hstats_rest_update',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+
+    // DELETE /records/{id}
+    register_rest_route( $ns, '/records/(?P<id>\d+)', [
+        'methods'             => 'DELETE',
+        'callback'            => 'hstats_rest_delete',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+
+    // GET /computed — fetches computed indicators from DB
+    register_rest_route( $ns, '/computed', [
+        'methods'             => 'GET',
+        'callback'            => 'hstats_rest_computed',
+        'permission_callback' => '__return_true',
+        'args'                => [
+            'year'       => [ 'required' => true,  'validate_callback' => function($v){ return is_numeric($v) && $v > 1900 && $v < 2200; } ],
+            'month'      => [ 'required' => false, 'validate_callback' => function($v){ return is_numeric($v) && $v >= 1 && $v <= 12; } ],
+            'quarter'    => [ 'required' => false, 'validate_callback' => function($v){ return is_numeric($v) && $v >= 1 && $v <= 4; } ],
+            'all_months' => [ 'required' => false ],
+        ],
+    ] );
+
+    // GET /years — list available years
+    register_rest_route( $ns, '/years', [
+        'methods'             => 'GET',
+        'callback'            => function() {
+            return new WP_REST_Response( HSTATS_Data::get_available_years(), 200 );
+        },
+        'permission_callback' => '__return_true',
+    ] );
+
+    // GET /indicators
+    register_rest_route( $ns, '/indicators', [
+        'methods'             => 'GET',
+        'callback'            => 'hstats_rest_indicators',
+        'permission_callback' => 'hstats_rest_read_permission',
+    ] );
+
+    // GET /export/csv
+    register_rest_route( $ns, '/export/csv', [
+        'methods'             => 'GET',
+        'callback'            => 'hstats_rest_export_csv',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+
+    // POST /import/csv
+    register_rest_route( $ns, '/import/csv', [
+        'methods'             => 'POST',
+        'callback'            => 'hstats_rest_import_csv',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+
+    // GET /audit-log
+    register_rest_route( $ns, '/audit-log', [
+        'methods'             => 'GET',
+        'callback'            => 'hstats_rest_audit_log',
+        'permission_callback' => 'hstats_rest_write_permission',
+    ] );
+}
+
+// function hstats_rest_read_permission(): bool  { return current_user_can( 'read' ); }
+function hstats_rest_read_permission(): bool  { return true; }
+function hstats_rest_write_permission(): bool { return current_user_can( 'manage_options' ); }
+
+function hstats_rest_computed( WP_REST_Request $req ): WP_REST_Response {
+    $year = (int) $req->get_param( 'year' );
+
+    if ( $req->get_param( 'all_months' ) ) {
+        $months = HSTATS_Data::get_months_in_year( $year );
+        return new WP_REST_Response( $months ?: new stdClass(), 200 );
+    }
+
+    if ( $req->get_param( 'month' ) !== null ) {
+        $month = (int) $req->get_param( 'month' );
+        $data  = HSTATS_Data::get_month( $year, $month );
+        return $data
+            ? new WP_REST_Response( $data, 200 )
+            : new WP_REST_Response( null, 204 );
+    }
+
+    if ( $req->get_param( 'quarter' ) !== null ) {
+        $quarter = (int) $req->get_param( 'quarter' );
+        $data    = HSTATS_Data::get_quarter( $year, $quarter );
+        return $data
+            ? new WP_REST_Response( $data, 200 )
+            : new WP_REST_Response( null, 204 );
+    }
+
+    $data = HSTATS_Data::get_year( $year );
+    return $data
+        ? new WP_REST_Response( $data, 200 )
+        : new WP_REST_Response( null, 204 );
+}
+
+function hstats_rest_list( WP_REST_Request $req ): WP_REST_Response {
+    return new WP_REST_Response( HSTATS_Data::get_all_raw(), 200 );
+}
+
+function hstats_rest_read( WP_REST_Request $req ): WP_REST_Response {
+    $row = HSTATS_Data::get_row_by_id( (int)$req['id'] );
+    return $row ? new WP_REST_Response( $row, 200 ) : new WP_REST_Response( [ 'error'=>'Not found' ], 404 );
+}
+
+function hstats_rest_create( WP_REST_Request $req ): WP_REST_Response {
+    $data   = $req->get_json_params() ?: $req->get_body_params();
+    $result = HSTATS_Data::save_month( $data, get_current_user_id() );
+    return new WP_REST_Response( $result, 201 );
+}
+
+function hstats_rest_update( WP_REST_Request $req ): WP_REST_Response {
+    $row = HSTATS_Data::get_row_by_id( (int)$req['id'] );
+    if ( ! $row ) return new WP_REST_Response( [ 'error'=>'Not found' ], 404 );
+    $body   = $req->get_json_params() ?: $req->get_body_params();
+    $data   = array_merge( $row, (array)$body );
+    $result = HSTATS_Data::save_month( $data, get_current_user_id() );
+    return new WP_REST_Response( $result, 200 );
+}
+
+function hstats_rest_delete( WP_REST_Request $req ): WP_REST_Response {
+    $ok = HSTATS_Data::delete_month( (int)$req['id'], get_current_user_id() );
+    return new WP_REST_Response( [ 'deleted' => $ok ], $ok ? 200 : 404 );
+}
+
+function hstats_rest_indicators( WP_REST_Request $req ): WP_REST_Response {
+    $year    = (int)($req['year']    ?? date('Y'));
+    $month   = (int)($req['month']   ?? 0);
+    $quarter = (int)($req['quarter'] ?? 0);
+
+    if ( $month >= 1 && $month <= 12 ) {
+        $data = HSTATS_Data::get_month( $year, $month );
+    } elseif ( $quarter >= 1 && $quarter <= 4 ) {
+        $data = HSTATS_Data::get_quarter( $year, $quarter );
+    } else {
+        $data = HSTATS_Data::get_year( $year );
+    }
+    return new WP_REST_Response( $data, 200 );
+}
+
+function hstats_rest_export_csv( WP_REST_Request $req ): void {
+    if ( ! current_user_can('manage_options') ) { wp_die('Unauthorized'); }
+    $rows   = HSTATS_Data::get_all_raw();
+    $fields = hstats_input_fields();
+    $cols   = [ 'id','period_year','period_month' ];
+    foreach ( $fields as $section ) { foreach ( $section as $k => $info ) { $cols[] = $k; } }
+    $cols[] = 'notes';
+
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="hospital-statistics-' . date('Ymd') . '.csv"');
+    $out = fopen('php://output','w');
+    fputcsv( $out, $cols );
+    foreach ( $rows as $r ) {
+        $line = [];
+        foreach ( $cols as $c ) { $line[] = $r[$c] ?? ''; }
+        fputcsv( $out, $line );
+    }
+    fclose($out);
+    exit;
+}
+
+function hstats_rest_import_csv( WP_REST_Request $req ): WP_REST_Response {
+    $csv    = $req->get_body();
+    $lines  = explode("\n", trim($csv));
+    $header = str_getcsv( array_shift($lines) );
+    $imported = 0; $errors = [];
+    foreach ( $lines as $i => $line ) {
+        if ( empty(trim($line)) ) continue;
+        $vals = str_getcsv($line);
+        if ( count($vals) !== count($header) ) { $errors[] = "Row " . ($i+2) . ": column mismatch"; continue; }
+        $data = array_combine( $header, $vals );
+        try {
+            HSTATS_Data::save_month( $data, get_current_user_id() );
+            $imported++;
+        } catch ( Exception $e ) {
+            $errors[] = "Row " . ($i+2) . ": " . $e->getMessage();
+        }
+    }
+    return new WP_REST_Response( [ 'imported'=>$imported, 'errors'=>$errors ], 200 );
+}
+
+function hstats_rest_audit_log( WP_REST_Request $req ): WP_REST_Response {
+    global $wpdb;
+    $limit = min( (int)($req['limit'] ?? 50), 200 );
+    $rows = $wpdb->get_results(
+        $wpdb->prepare( "SELECT * FROM " . $wpdb->prefix . HSTATS_LOG_TABLE . " ORDER BY created_at DESC LIMIT %d", $limit ),
+        ARRAY_A
+    );
+    return new WP_REST_Response( $rows ?: [], 200 );
+}
+
+/* ==========================================================================
+   7. ADMIN MENU
+========================================================================== */
+add_action( 'admin_menu', 'hstats_admin_menu' );
+function hstats_admin_menu(): void {
+    add_menu_page( 'Hospital Statistics', 'Hospital Stats', 'manage_options', 'hospital-statistics', 'hstats_admin_overview', 'dashicons-chart-bar', 26 );
+    add_submenu_page( 'hospital-statistics', 'All Records',     'All Records',    'manage_options', 'hospital-statistics',          'hstats_admin_overview' );
+    add_submenu_page( 'hospital-statistics', 'Add / Edit Data', 'Add / Edit',     'manage_options', 'hospital-statistics-entry',    'hstats_admin_entry' );
+    add_submenu_page( 'hospital-statistics', 'Import CSV',      'Import CSV',     'manage_options', 'hospital-statistics-import',   'hstats_admin_import' );
+    add_submenu_page( 'hospital-statistics', 'Audit Log',       'Audit Log',      'manage_options', 'hospital-statistics-audit',    'hstats_admin_audit' );
+    add_submenu_page( 'hospital-statistics', 'Settings',        'Settings',       'manage_options', 'hospital-statistics-settings', 'hstats_admin_settings' );
+}
+
+add_action( 'admin_enqueue_scripts', function( $hook ) {
+    if ( strpos($hook,'hospital-statistics') === false ) return;
+    wp_enqueue_style(  'hstats-admin', HSTATS_PLUGIN_URL . 'assets/admin.css', [], HSTATS_VERSION );
+    wp_enqueue_style('tabler-icons', 'https://cdnjs.cloudflare.com/ajax/libs/tablericons/3.14.0/webfont/tabler-icons.min.css', [], '3.14.0');
+    wp_enqueue_script( 'hstats-admin', HSTATS_PLUGIN_URL . 'assets/admin.js',  ['jquery'], HSTATS_VERSION, true );
+    wp_localize_script( 'hstats-admin', 'HSTATS_ADMIN', [
+        'nonce'     => wp_create_nonce('wp_rest'),
+        'rest_url'  => esc_url_raw( rest_url('hstats/v1') ),
+        'admin_url' => admin_url('admin.php'),
+    ] );
+} );
+
+/* ------- Admin: Overview page ------- */
+function hstats_admin_overview(): void {
+    $rows = HSTATS_Data::get_all_raw();
+    $month_names = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
+    ?>
+    <div class="wrap hstats-admin-wrap">
+        <h1 class="hstats-page-title">🏥 Hospital Statistics — All Records</h1>
+        <div class="hstats-toolbar">
+            <a href="<?php echo esc_url(admin_url('admin.php?page=hospital-statistics-entry')); ?>" class="button button-primary">➕ Add New Record</a>
+            <a href="<?php echo esc_url(rest_url('hstats/v1/export/csv')); ?>&_wpnonce=<?php echo wp_create_nonce('wp_rest'); ?>" class="button">📥 Export CSV</a>
+            <a href="<?php echo esc_url(admin_url('admin.php?page=hospital-statistics-import')); ?>" class="button">📤 Import CSV</a>
+        </div>
+        <p>Shortcode: <code>[hospital_statistics]</code> — place on any page to display the public statistics dashboard.</p>
+        <table class="widefat striped hstats-table">
+            <thead>
+                <tr>
+                    <th>ID</th><th>Period</th><th>Admissions</th><th>Discharges+Deaths</th><th>BOR %</th><th>ADC</th><th>ALOS</th><th>GDR %</th><th>Updated</th><th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php if ( empty($rows) ) : ?>
+                <tr><td colspan="10" style="text-align:center;padding:24px">No records found. <a href="<?php echo esc_url(admin_url('admin.php?page=hospital-statistics-entry')); ?>">Add your first record.</a></td></tr>
+            <?php else : foreach ( $rows as $r ) :
+                $calc   = HSTATS_Formulas::compute_all( $r );
+                $period = esc_html($month_names[(int)$r['period_month']] . ' ' . $r['period_year']);
+            ?>
+                <tr>
+                    <td><?php echo (int)$r['id']; ?></td>
+                    <td><strong><?php echo $period; ?></strong></td>
+                    <td><?php echo number_format((int)$r['ip_admissions']); ?></td>
+                    <td><?php echo number_format((int)$r['ip_discharges_deaths']); ?></td>
+                    <td><?php echo $calc['BOR']; ?>%</td>
+                    <td><?php echo $calc['ADC']; ?></td>
+                    <td><?php echo $calc['ALS']; ?></td>
+                    <td><?php echo $calc['GDR']; ?>%</td>
+                    <td><?php echo esc_html(substr($r['updated_at']??'',0,10)); ?></td>
+                    <td>
+                        <a href="<?php echo esc_url(admin_url('admin.php?page=hospital-statistics-entry&year='.$r['period_year'].'&month='.$r['period_month'])); ?>" class="button button-small">✏️ Edit</a>
+                        <button class="button button-small hstats-delete-btn" data-id="<?php echo (int)$r['id']; ?>" data-period="<?php echo $period; ?>" style="color:#c00">🗑 Delete</button>
+                    </td>
+                </tr>
+            <?php endforeach; endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php
+}
+
+/* ------- Admin: Entry page (CREATE + UPDATE) ------- */
+function hstats_admin_entry(): void {
+    $month_names = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
+    $notice = '';
+
+    if ( isset($_POST['hstats_nonce']) && wp_verify_nonce( sanitize_text_field(wp_unslash($_POST['hstats_nonce'])), 'hstats_save' ) && current_user_can('manage_options') ) {
+        $post_data = [];
+        $raw = $_POST['hstats'] ?? [];
+        foreach ( $raw as $k => $v ) {
+            $post_data[ sanitize_key($k) ] = (int)$v;
+        }
+        $post_data['notes']        = sanitize_textarea_field($_POST['hstats_notes'] ?? '');
+        $post_data['period_year']  = (int)($_POST['entry_year']  ?? date('Y'));
+        $post_data['period_month'] = (int)($_POST['entry_month'] ?? date('n'));
+        $result = HSTATS_Data::save_month( $post_data, get_current_user_id() );
+        $notice = $result['action'] === 'created'
+            ? '<div class="notice notice-success is-dismissible"><p>✅ Record created successfully for ' . esc_html($month_names[$post_data['period_month']] . ' ' . $post_data['period_year']) . '!</p></div>'
+            : '<div class="notice notice-success is-dismissible"><p>✅ Record updated successfully for ' . esc_html($month_names[$post_data['period_month']] . ' ' . $post_data['period_year']) . '!</p></div>';
+    }
+
+$sel_year  = isset($_GET['year'])  ? (int)$_GET['year']  : (int)date('Y');
+$sel_month = isset($_GET['month']) ? (int)$_GET['month'] : (int)date('n');
+$days_in_month = cal_days_in_month( CAL_GREGORIAN, $sel_month, $sel_year );
+
+    global $wpdb;
+    $table = $wpdb->prefix . HSTATS_TABLE;
+    $row   = $wpdb->get_row( $wpdb->prepare("SELECT * FROM {$table} WHERE period_year=%d AND period_month=%d", $sel_year, $sel_month), ARRAY_A );
+$v = function( string $f ) use ($row, $days_in_month): int {
+    if ( $f === 'ip_days_in_period' && ( !isset($row[$f]) || (int)$row[$f] === 0 ) ) {
+        return $days_in_month;
+    }
+    return isset($row[$f]) ? (int)$row[$f] : 0;
+};
+    echo $notice;
+    ?>
+    <div class="wrap hstats-admin-wrap">
+        <h1 class="hstats-page-title">✏️ <?php echo $row ? 'Edit' : 'Add'; ?> Hospital Statistics</h1>
+
+        <form method="GET" class="hstats-period-form">
+            <input type="hidden" name="page" value="hospital-statistics-entry">
+            <label>Year: <input type="number" name="year" value="<?php echo esc_attr($sel_year); ?>" style="width:80px;margin-left:6px"></label>
+            <label style="margin-left:12px">Month:
+                <select name="month">
+                    <?php for ($i=1;$i<=12;$i++): ?>
+                        <option value="<?php echo $i; ?>" <?php selected($sel_month,$i); ?>><?php echo $month_names[$i]; ?></option>
+                    <?php endfor; ?>
+                </select>
+            </label>
+            <button class="button" style="margin-left:8px">Load Period</button>
+            <?php if ($row): ?>
+                <span class="hstats-exists-badge">✅ Record Exists — Editing</span>
+            <?php else: ?>
+                <span class="hstats-new-badge">🆕 New Record</span>
+            <?php endif; ?>
+        </form>
+
+        <form method="POST" id="hstats-entry-form">
+            <?php wp_nonce_field('hstats_save','hstats_nonce'); ?>
+            <input type="hidden" name="entry_year"  value="<?php echo esc_attr($sel_year); ?>">
+            <input type="hidden" name="entry_month" value="<?php echo esc_attr($sel_month); ?>">
+
+            <h2 class="hstats-section-heading">📅 <?php echo esc_html($month_names[$sel_month].' '.$sel_year); ?></h2>
+
+            <?php foreach (hstats_input_fields() as $section => $fields): ?>
+            <div class="hstats-entry-section">
+                <h3 class="hstats-entry-section-title"><?php echo esc_html($section); ?></h3>
+                <div class="hstats-entry-grid">
+                    <?php foreach ($fields as $key => $meta): ?>
+                    <label class="hstats-field-label">
+                        <span class="hstats-field-name"><?php echo esc_html($meta['label']); ?></span>
+                        <input type="number"
+                            name="hstats[<?php echo esc_attr($key); ?>]"
+                            value="<?php echo esc_attr($v($key)); ?>"
+                            min="<?php echo (int)($meta['min']??0); ?>"
+                            <?php if(isset($meta['max'])): ?>max="<?php echo (int)$meta['max']; ?>"<?php endif; ?>
+                            class="hstats-input">
+                    </label>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+
+            <div class="hstats-entry-section">
+                <h3 class="hstats-entry-section-title">📝 Notes</h3>
+                <textarea name="hstats_notes" rows="3" style="width:100%;max-width:600px;padding:8px;border:1px solid #ddd;border-radius:6px"><?php echo esc_textarea($row['notes']??''); ?></textarea>
+            </div>
+
+            <div class="hstats-entry-actions">
+                <button type="submit" class="button button-primary button-large">💾 Save Statistics</button>
+                <a href="<?php echo esc_url(admin_url('admin.php?page=hospital-statistics')); ?>" class="button button-large">← Back to All Records</a>
+            </div>
+        </form>
+
+        <?php if ($row): $calc = HSTATS_Formulas::compute_all($row); ?>
+        <div class="hstats-preview-section">
+            <h3>🔢 Calculated Indicators — Live Preview</h3>
+            <div class="hstats-preview-grid">
+                <?php foreach (hstats_indicator_labels() as $k => $info): if(isset($calc[$k])): ?>
+                <div class="hstats-preview-card" data-key="<?php echo esc_attr($k); ?>" style="border-top-color:<?php echo esc_attr($info['color']); ?>">
+                    <span class="hstats-preview-icon"><?php echo $info['icon']; ?></span>
+                    <div class="hstats-preview-val"><?php echo esc_html($calc[$k]); ?> <small><?php echo esc_html($info['unit']); ?></small></div>
+                    <div class="hstats-preview-lbl"><?php echo esc_html($k); ?> — <?php echo esc_html($info['label']); ?></div>
+                </div>
+                <?php endif; endforeach; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+/* ------- Admin: Import page ------- */
+function hstats_admin_import(): void {
+    ?>
+    <div class="wrap hstats-admin-wrap">
+        <h1 class="hstats-page-title">📤 Import CSV</h1>
+        <div class="hstats-card" style="max-width:700px">
+            <h3>CSV Format Requirements</h3>
+            <p>The CSV must have a header row with these exact column names (in any order):</p>
+            <code style="display:block;padding:10px;background:#f5f5f5;border-radius:6px;font-size:12px;word-break:break-all">period_year, period_month, ip_service_days_total, ip_days_in_period, ip_authorized_beds, ip_remaining_midnight, ip_admissions, ip_discharges_deaths, ip_same_day, ip_length_of_stay_total, d_total, d_under_48h, d_newborns, opd_new_visits, opd_revisits, opd_days, ed_consults, ed_days, ob_cs_sections, ob_total_deliveries, ob_maternal_deaths, ob_obstetrical_discharges, inf_total_infections, notes</code>
+            <br>
+            <p>Existing records for the same year+month will be <strong>overwritten</strong>. New records will be created.</p>
+
+            <form id="hstats-import-form" enctype="multipart/form-data">
+                <?php wp_nonce_field('hstats_import','hstats_import_nonce'); ?>
+                <input type="file" id="hstats-csv-file" accept=".csv" style="margin-bottom:12px">
+                <br>
+                <div id="hstats-import-preview" style="display:none;max-height:200px;overflow-y:auto;margin:12px 0;font-size:12px;border:1px solid #ddd;padding:8px;border-radius:4px;background:#fafafa"></div>
+                <button type="submit" class="button button-primary" id="hstats-import-btn" disabled>📤 Import CSV</button>
+                <a href="<?php echo esc_url(rest_url('hstats/v1/export/csv')); ?>&_wpnonce=<?php echo wp_create_nonce('wp_rest'); ?>" class="button" style="margin-left:8px">📥 Download Data as Template</a>
+            </form>
+            <div id="hstats-import-result" style="margin-top:16px"></div>
+        </div>
+    </div>
+    <?php
+}
+
+/* ------- Admin: Audit log ------- */
+function hstats_admin_audit(): void {
+    global $wpdb;
+    $logs = $wpdb->get_results( "SELECT * FROM " . $wpdb->prefix . HSTATS_LOG_TABLE . " ORDER BY created_at DESC LIMIT 200", ARRAY_A );
+    ?>
+    <div class="wrap hstats-admin-wrap">
+        <h1 class="hstats-page-title">📋 Audit Log</h1>
+        <p>Shows the last 200 changes to hospital statistics records.</p>
+        <table class="widefat striped hstats-table">
+            <thead><tr><th>Date/Time</th><th>Action</th><th>Period</th><th>User</th><th>IP</th></tr></thead>
+            <tbody>
+            <?php if (empty($logs)): ?>
+                <tr><td colspan="5" style="text-align:center;padding:24px">No audit records yet.</td></tr>
+            <?php else: foreach ($logs as $l):
+                $new = $l['new_data'] ? json_decode($l['new_data'], true) : [];
+                $mn = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                $period = '';
+                if ($new && isset($new['period_month'], $new['period_year'])) {
+                    $period = ($mn[(int)$new['period_month']] ?? '') . ' ' . $new['period_year'];
+                }
+            ?>
+                <tr>
+                    <td><?php echo esc_html($l['created_at']); ?></td>
+                    <td><span class="hstats-action-badge hstats-action-<?php echo esc_attr($l['action']); ?>"><?php echo esc_html(strtoupper($l['action'])); ?></span></td>
+                    <td><?php echo esc_html($period ?: 'ID #'.$l['record_id']); ?></td>
+                    <td><?php echo esc_html($l['user_name']); ?></td>
+                    <td><?php echo esc_html($l['ip_address']); ?></td>
+                </tr>
+            <?php endforeach; endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php
+}
+
+/* ------- Admin: Settings ------- */
+function hstats_admin_settings(): void {
+    if ( isset($_POST['hstats_settings_nonce']) && wp_verify_nonce( sanitize_text_field(wp_unslash($_POST['hstats_settings_nonce'])), 'hstats_settings' ) && current_user_can('manage_options') ) {
+        update_option('hstats_hospital_name',    sanitize_text_field($_POST['hospital_name']??''));
+        update_option('hstats_hospital_address', sanitize_textarea_field($_POST['hospital_address']??''));
+        update_option('hstats_default_beds',     (int)($_POST['default_beds']??100));
+        update_option('hstats_enable_audit',     isset($_POST['enable_audit']) ? 1 : 0);
+        echo '<div class="notice notice-success is-dismissible"><p>✅ Settings saved!</p></div>';
+    }
+    ?>
+    <div class="wrap hstats-admin-wrap">
+        <h1 class="hstats-page-title">⚙️ Settings</h1>
+        <form method="POST" style="max-width:640px">
+            <?php wp_nonce_field('hstats_settings','hstats_settings_nonce'); ?>
+            <table class="form-table">
+                <tr>
+                    <th scope="row">Hospital Name</th>
+                    <td><input type="text" name="hospital_name" value="<?php echo esc_attr(get_option('hstats_hospital_name',get_bloginfo('name'))); ?>" class="regular-text"></td>
+                </tr>
+                <tr>
+                    <th scope="row">Hospital Address</th>
+                    <td><textarea name="hospital_address" rows="2" class="regular-text"><?php echo esc_textarea(get_option('hstats_hospital_address','')); ?></textarea></td>
+                </tr>
+                <tr>
+                    <th scope="row">Default Authorized Beds</th>
+                    <td><input type="number" name="default_beds" value="<?php echo esc_attr(get_option('hstats_default_beds',100)); ?>" min="1" style="width:80px"></td>
+                </tr>
+                <tr>
+                    <th scope="row">Enable Audit Log</th>
+                    <td><label><input type="checkbox" name="enable_audit" <?php checked(get_option('hstats_enable_audit',1),1); ?>> Track all create/update/delete actions</label></td>
+                </tr>
+            </table>
+            <?php submit_button('Save Settings'); ?>
+        </form>
+        <hr>
+        <h3 style="color:#c00">⚠ Danger Zone</h3>
+        <p>This will permanently delete ALL statistics records and the audit log. This action cannot be undone.</p>
+        <button class="button" id="hstats-reset-all" style="color:#c00;border-color:#c00">🗑 Delete ALL Records</button>
+    </div>
+    <?php
+}
+
+/* ==========================================================================
+   8. SHORTCODE + FRONTEND
+========================================================================== */
+add_shortcode( 'hospital_statistics', 'hstats_shortcode' );
+function hstats_shortcode( array $atts ): string {
+    $atts = shortcode_atts([
+        'title'       => get_option('hstats_hospital_name','Hospital Statistics Dashboard'),
+        'show_export' => 'yes',
+    ], $atts );
+
+    wp_enqueue_style(  'hstats-front',  HSTATS_PLUGIN_URL . 'assets/front.css',  [], HSTATS_VERSION );
+    wp_enqueue_script( 'chartjs',       'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js', [], '4.4.0', true );
+    wp_enqueue_script( 'hstats-front',  HSTATS_PLUGIN_URL . 'assets/front.js',   ['jquery','chartjs'], HSTATS_VERSION, true );
+
+    $years    = HSTATS_Data::get_available_years();
+    $cur_year = ! empty($years) ? (int)$years[0] : (int)date('Y');
+
+    // Default to previous month since current month is not yet complete
+    $cur_month = (int)date('n') - 1;
+    $cur_year_adjusted = $cur_year;
+    if ( $cur_month < 1 ) {
+        $cur_month         = 12;
+        $cur_year_adjusted = $cur_year - 1;
+    }
+
+    wp_localize_script( 'hstats-front', 'HSTATS', [
+        'data'         => [],
+        'labels'       => hstats_indicator_labels(),
+        'curYear'      => $cur_year_adjusted,
+        'curMonth'     => $cur_month,
+        'years'        => array_map('intval', $years),
+        'monthNames'   => ['','January','February','March','April','May','June','July','August','September','October','November','December'],
+        'qNames'       => ['','Q1 (Jan–Mar)','Q2 (Apr–Jun)','Q3 (Jul–Sep)','Q4 (Oct–Dec)'],
+        'hospitalName' => get_option('hstats_hospital_name',''),
+        'showExport'   => ($atts['show_export'] === 'yes') && current_user_can('manage_options'),
+        'nonce'        => wp_create_nonce('wp_rest'),
+        'restUrl'      => esc_url_raw(rest_url('hstats/v1')),
+        'version'      => HSTATS_VERSION,
+    ] );
+
+    ob_start();
+    $template = HSTATS_PLUGIN_DIR . 'templates/dashboard.php';
+    if ( file_exists($template) ) {
+        include $template;
+    }
+    return ob_get_clean();
+}
+
+/* ==========================================================================
+   9. PLUGIN ACTION LINKS
+========================================================================== */
+add_filter( 'plugin_action_links_' . plugin_basename(__FILE__), function( $links ) {
+    $links[] = '<a href="' . admin_url('admin.php?page=hospital-statistics') . '" style="font-weight:700;background:linear-gradient(90deg,#2563eb,#7c3aed,#db2777,#2563eb);background-size:200% auto;color:transparent;-webkit-background-clip:text;background-clip:text;animation:hstats-shimmer 2s linear infinite">📊 Dashboard</a>';
+    $links[] = '<a href="' . admin_url('admin.php?page=hospital-statistics-entry') . '" style="font-weight:700;background:linear-gradient(90deg,#059669,#0891b2,#059669);background-size:200% auto;color:transparent;-webkit-background-clip:text;background-clip:text;animation:hstats-shimmer 2s linear infinite">➕ Add Data</a>';
+    return $links;
+} );
+add_action( 'admin_head', function() {
+    echo '<style>@keyframes hstats-shimmer{0%{background-position:0% center}100%{background-position:200% center}}</style>';
+} );
