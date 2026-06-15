@@ -19,16 +19,34 @@ This repository contains the field-to-field mapping between the **May 2026 DOCX*
 | Total Length of Stay of discharged patients | **Total Length of Stay of discharged patients** | **4,011** |
 
 > [!NOTE]
-> ### 📌 Understanding the "Census Discharges" & "187" Relationship
-> The value **187** represents the raw **Inpatients Service Days** recorded on the final 24-hour daily census tracking sheet. To maintain data integrity inside the system, the hidden parameters must perfectly balance out using the daily census tracking equation:
+> ### 📌 Understanding the "Census Discharges" Value
+> The field **Discharges & Deaths (last day of month only)** does not exist as a separate raw number line in the source report document. Instead, it is a derived balance parameter required to satisfy the system's daily bed census accounting logic.
 > 
-> **Daily Census Equation:**
-> $$\text{Inpatients Service Days} = (\text{Remaining at Midnight} + \text{Admissions}) - \text{Census Discharges} + \text{Same Day}$$
+> **The Calculation Formula:**
+> $$\text{Census Discharges} = (\text{Remaining at Midnight} + \text{Admissions} + \text{Same Day}) - \text{Inpatients Service Days}$$
 > 
 > Using the May 2026 dataset parameters:
-> $$(123 + 1,198) - \mathbf{1,134} + 0 = \mathbf{187}$$
+> $$(123 + 1,198 + 0) - \mathbf{187} = \mathbf{1,134}$$
 > 
-> *Note: This calculation has been completely automated via the custom jQuery script added to your data submission view.*
+> *This value is handled automatically on the client-side via the implemented jQuery autofill hook script.*
+
+> [!TIP]
+> ### 🧮 Understanding the "187" Value (Daily Census Formula)
+> The number **187** represents the raw **Inpatients Service Days** recorded on the final 24-hour daily census tracking sheet. To maintain data integrity across systems, the numbers balance using the **Daily Census Balance Equation**:
+> 
+> **The Math Equation:**
+> $$\text{Inpatients Service Days} = (\text{Inpatients Remaining at Midnight [Start]}) + \text{Admissions} - \text{Census Discharges} + \text{Same Day Admissions \& Discharges}$$
+> 
+> **🧩 Plugging in the May 2026 Metrics:**
+> * Inpatients Remaining at Midnight (Start): **123**
+> * Total Admissions: **1,198**
+> * Census Discharges & Deaths: <span style="color:#2563eb; font-weight:bold;">**1,134**</span> *(The value derived from system balance)*
+> * Admitted & Discharged Same Day: **0**
+> 
+> **The Math Calculation:**
+> $$\text{Inpatients Service Days} = (123 + 1,198) - 1,134 + 0$$
+> $$\text{Inpatients Service Days} = 1,321 - 1,134$$
+> $$\text{Inpatients Service Days} = \mathbf{187}$$
 
 ---
 
