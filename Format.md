@@ -50,7 +50,25 @@ This repository contains the field-to-field mapping between the **May 2026 DOCX*
 
 ---
 
-## 2. Additional Sections
+## 2. Neonatal Indicators
+
+> [!IMPORTANT]
+> ### 👶 Neonatal Death Rate Calculation
+> This metric evaluates infant mortality performance indicators based on total newborn lifecycle tracking configurations.
+> 
+> **Mathematical Formula:**
+> $$\text{Neonatal Death Rate} = \left( \frac{\text{Total no. of NB deaths for the period}}{\text{Total no. of NB Infant discharges (including deaths) for the period}} \right) \times 100$$
+> 
+> **🧩 Sample Dataset Parameters (May 2026):**
+> * Total no. of NB deaths for the period: **2**
+> * Total no. of NB Infant discharges (including deaths) for the period: **309**
+> 
+> **The Rate Metric Run:**
+> $$\text{Neonatal Death Rate} = \left( \frac{2}{309} \right) \times 100 \approx \mathbf{0.65\%}$$
+
+---
+
+## 3. Additional Sections
 
 ### Deaths Section
 
