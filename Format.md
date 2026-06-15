@@ -1,6 +1,6 @@
 # May 2026 Hospital Report Mapping
 
-This repository contains the field-to-field mapping between the **May 2026 DOCX** report and the internal system fields.
+This repository contains the field-to-field mapping between the **May 2026 DOCX** report and the internal system data inputs.
 
 ---
 
@@ -15,8 +15,19 @@ This repository contains the field-to-field mapping between the **May 2026 DOCX*
 | Admissions | **Total Admissions** | **1,198** |
 | Total discharges and deaths for the same period | **Total discharges including deaths and newborns** | **1,194** |
 | Admitted & Discharged on the same day | **Admitted & Discharged Same Day** | **0** |
-| *(Calculated for Census)* | **Discharges & Deaths (last day of month only)** | **1,134** |
+| *(Derived from Census Logic)* | **Discharges & Deaths (last day of month only)** | **1,134** |
 | Total Length of Stay of discharged patients | **Total Length of Stay of discharged patients** | **4,011** |
+
+> ### 📌 Note: Understanding the "Census Discharges" Value
+> The field **Discharges & Deaths (last day of month only)** does not exist as a separate raw number line in the source report document. Instead, it is a derived balance parameter required to satisfy the system's daily bed census accounting logic.
+> 
+> **The Calculation Formula:**
+> $$\text{Census Discharges} = (\text{Remaining at Midnight} + \text{Admissions} + \text{Same Day}) - \text{Inpatients Service Days}$$
+> 
+> Using the May 2026 dataset parameters:
+> $$(123 + 1,198 + 0) - 187 = \mathbf{1,134}$$
+> 
+> *This value is handled automatically on the client-side via the implemented jQuery autofill hook script.*
 
 ---
 
