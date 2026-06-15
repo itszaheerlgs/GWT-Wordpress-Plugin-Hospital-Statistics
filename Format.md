@@ -19,16 +19,16 @@ This repository contains the field-to-field mapping between the **May 2026 DOCX*
 | Total Length of Stay of discharged patients | **Total Length of Stay of discharged patients** | **4,011** |
 
 > [!NOTE]
-> ### 📌 Understanding the "Census Discharges" Value
-> The field **Discharges & Deaths (last day of month only)** does not exist as a separate raw number line in the source report document. Instead, it is a derived balance parameter required to satisfy the system's daily bed census accounting logic.
+> ### 📌 Understanding the "Census Discharges" & "187" Relationship
+> The value **187** represents the raw **Inpatients Service Days** recorded on the final 24-hour daily census tracking sheet. To maintain data integrity inside the system, the hidden parameters must perfectly balance out using the daily census tracking equation:
 > 
-> **The Calculation Formula:**
-> $$\text{Census Discharges} = (\text{Remaining at Midnight} + \text{Admissions} + \text{Same Day}) - \text{Inpatients Service Days}$$
+> **Daily Census Equation:**
+> $$\text{Inpatients Service Days} = (\text{Remaining at Midnight} + \text{Admissions}) - \text{Census Discharges} + \text{Same Day}$$
 > 
 > Using the May 2026 dataset parameters:
-> $$(123 + 1,198 + 0) - \mathbf{187} = \mathbf{1,134}$$
+> $$(123 + 1,198) - \mathbf{1,134} + 0 = \mathbf{187}$$
 > 
-> *Note: The **187** value represents the raw **Inpatients Service Days** recorded on the final 24-hour daily census sheet. This target field value is now completely automated on the client-side via the implemented jQuery autofill hook script.*
+> *Note: This calculation has been completely automated via the custom jQuery script added to your data submission view.*
 
 ---
 
