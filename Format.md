@@ -15,19 +15,20 @@ This repository contains the field-to-field mapping between the **May 2026 DOCX*
 | Admissions | **Total Admissions** | **1,198** |
 | Total discharges and deaths for the same period | **Total discharges including deaths and newborns** | **1,194** |
 | Admitted & Discharged on the same day | **Admitted & Discharged Same Day** | **0** |
-| *(Derived from Census Logic)* | **Discharges & Deaths (last day of month only)** | **1,134** |
+| <span style="color:#d97706; font-weight:bold;">*(Derived Formula)*</span> | **Discharges & Deaths (last day of month only)** | <span style="color:#2563eb; font-weight:bold;">**1,134**</span> |
 | Total Length of Stay of discharged patients | **Total Length of Stay of discharged patients** | **4,011** |
 
-> ### 📌 Note: Understanding the "Census Discharges" Value
+> [!NOTE]
+> ### 📌 Understanding the "Census Discharges" Value
 > The field **Discharges & Deaths (last day of month only)** does not exist as a separate raw number line in the source report document. Instead, it is a derived balance parameter required to satisfy the system's daily bed census accounting logic.
 > 
 > **The Calculation Formula:**
 > $$\text{Census Discharges} = (\text{Remaining at Midnight} + \text{Admissions} + \text{Same Day}) - \text{Inpatients Service Days}$$
 > 
 > Using the May 2026 dataset parameters:
-> $$(123 + 1,198 + 0) - 187 = \mathbf{1,134}$$
+> $$(123 + 1,198 + 0) - \mathbf{187} = \mathbf{1,134}$$
 > 
-> *This value is handled automatically on the client-side via the implemented jQuery autofill hook script.*
+> *Note: The **187** value represents the raw **Inpatients Service Days** recorded on the final 24-hour daily census sheet. This target field value is now completely automated on the client-side via the implemented jQuery autofill hook script.*
 
 ---
 
